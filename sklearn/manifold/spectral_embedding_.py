@@ -16,7 +16,7 @@ from ..utils.extmath import _deterministic_vector_sign_flip
 from ..utils.graph import graph_laplacian
 from ..utils.sparsetools import connected_components
 from ..utils.arpack import eigsh
-from ..metrics.pairwise import rbf_kernel
+from ..metrics.pairwise import rbf_kernel, euclidean_distances
 from ..neighbors import kneighbors_graph
 
 
@@ -132,7 +132,7 @@ def _set_diag(laplacian, value, norm_laplacian):
 
 def spectral_embedding(adjacency, n_components=8, eigen_solver=None,
                        random_state=None, eigen_tol=0.0,
-                       norm_laplacian=True, drop_first=True):
+                       norm_laplacian=True, drop_first=True, include_oos=False):
     """Project the sample on the first eigenvectors of the graph Laplacian.
 
     The adjacency matrix is used to compute a normalized graph Laplacian
@@ -182,10 +182,16 @@ def spectral_embedding(adjacency, n_components=8, eigen_solver=None,
     norm_laplacian : bool, optional, default=True
         If True, then compute normalized Laplacian.
 
+    include_oos : bool, optional, defauld=False
+        If True, additional parameters necessary for out-of-sample extension
+        are included.
+
     Returns
     -------
     embedding : array, shape=(n_samples, n_components)
         The reduced samples.
+    lambdas : array, shape=(n_components)
+        The eigenvalues of the laplacian matrix for OoS extension
 
     Notes
     -----
@@ -232,7 +238,7 @@ def spectral_embedding(adjacency, n_components=8, eigen_solver=None,
     laplacian, dd = graph_laplacian(adjacency,
                                     normed=norm_laplacian, return_diag=True)
     if (eigen_solver == 'arpack' or eigen_solver != 'lobpcg' and
-       (not sparse.isspmatrix(laplacian) or n_nodes < 5 * n_components)):
+        (not sparse.isspmatrix(laplacian) or n_nodes < 5 * n_components)):
         # lobpcg used with eigen_solver='amg' has bugs for low number of nodes
         # for details see the source code in scipy:
         # https://github.com/scipy/scipy/blob/v0.11.0/scipy/sparse/linalg/eigen
@@ -314,11 +320,20 @@ def spectral_embedding(adjacency, n_components=8, eigen_solver=None,
             if embedding.shape[0] == 1:
                 raise ValueError
 
-    embedding = _deterministic_vector_sign_flip(embedding)
-    if drop_first:
-        return embedding[1:n_components].T
+    if not include_oos:
+        embedding = _deterministic_vector_sign_flip(embedding)
+        if drop_first:
+            return embedding[1:n_components].T
+        else:
+            return embedding[:n_components].T
     else:
-        return embedding[:n_components].T
+        if drop_first:
+            embedding = embedding[1:n_components].T
+        else:
+            embedding = embedding[:n_components].T
+        # For out of sample, we also need to
+        # have original diffusion map ordered  (excluding constant vector)
+        return embedding, diffusion_map
 
 
 class SpectralEmbedding(BaseEstimator):
@@ -364,6 +379,15 @@ class SpectralEmbedding(BaseEstimator):
         The number of parallel jobs to run.
         If ``-1``, then the number of jobs is set to the number of CPU cores.
 
+    include_oos : bool, optional (default = False)
+        Sets up whether the algorithm should allow out-of-sample extension
+        (transform method).
+
+    copy : bool, optional (default = True)
+        Determines whether the algorithm should make a copy of the input
+        data or use it by a reference (only required for out-of-sample).
+
+
     Attributes
     ----------
 
@@ -372,6 +396,14 @@ class SpectralEmbedding(BaseEstimator):
 
     affinity_matrix_ : array, shape = (n_samples, n_samples)
         Affinity_matrix constructed from samples or precomputed.
+
+    eigenvalues_ : array, shape = (n_components)
+        Eigenvalues that are computed based on laplacian matrix
+        (eigenvalues of embedded vectors).
+
+    X_ : array shape = (n_saples, n_features)
+        Input data provided to the algorithm (required for out-of-sample
+        extension).
 
     References
     ----------
@@ -391,7 +423,8 @@ class SpectralEmbedding(BaseEstimator):
 
     def __init__(self, n_components=2, affinity="nearest_neighbors",
                  gamma=None, random_state=None, eigen_solver=None,
-                 n_neighbors=None, n_jobs=1):
+                 n_neighbors=None, n_jobs=1, include_oos=False,
+                 copy=True):
         self.n_components = n_components
         self.affinity = affinity
         self.gamma = gamma
@@ -399,6 +432,10 @@ class SpectralEmbedding(BaseEstimator):
         self.eigen_solver = eigen_solver
         self.n_neighbors = n_neighbors
         self.n_jobs = n_jobs
+        self.include_oos = include_oos
+        self.copy = copy
+        self.common_mean_ = None
+        self.kth_distance_ = None
 
     @property
     def _pairwise(self):
@@ -469,7 +506,7 @@ class SpectralEmbedding(BaseEstimator):
             Returns the instance itself.
         """
 
-        X = check_array(X, ensure_min_samples=2, estimator=self)
+        self.X_ = check_array(X, ensure_min_samples=2, estimator=self, copy=self.copy)
 
         random_state = check_random_state(self.random_state)
         if isinstance(self.affinity, six.string_types):
@@ -482,12 +519,112 @@ class SpectralEmbedding(BaseEstimator):
             raise ValueError(("'affinity' is expected to be an affinity "
                               "name or a callable. Got: %s") % self.affinity)
 
-        affinity_matrix = self._get_affinity_matrix(X)
-        self.embedding_ = spectral_embedding(affinity_matrix,
-                                             n_components=self.n_components,
-                                             eigen_solver=self.eigen_solver,
-                                             random_state=random_state)
+        affinity_matrix = self._get_affinity_matrix(self.X_)
+        if not self.include_oos:
+            self.embedding_ = spectral_embedding(affinity_matrix,
+                                                 n_components=self.n_components,
+                                                 eigen_solver=self.eigen_solver,
+                                                 random_state=random_state, include_oos=False)
+        else:
+            self.embedding_, self.diffusion_map_ = spectral_embedding(affinity_matrix,
+                                                                      n_components=self.n_components,
+                                                                      eigen_solver=self.eigen_solver,
+                                                                      random_state=random_state,
+                                                                      include_oos=True)
+
         return self
+
+    def _nth_distance_from_dataset(self):
+        """Calculate distance to the nth neighbor of each
+        point from the input data (for out-of-sample).
+
+        Returns
+        -------
+        nth_distances : array shape=(,n_samples)
+            Distances to the nth closest neighbor of each point
+        """
+        neighbors_graph = kneighbors_graph(self.X_, self.n_neighbors_, include_self=True,
+                                           mode='distance')
+        # Distance to the nth neighbor is just the maximum
+        return neighbors_graph.max(axis=1).toarray().reshape(1, -1)[0]
+
+    def _common_oos_mean(self):
+        """Calculate common mean for out-of-sample extension
+        (it is required for kernel approximation).
+
+        Returns
+        -------
+        common_mean : array shape=(,n_samples)
+            Common mean vector for each argument
+        """
+        return np.mean(self.affinity_matrix_, axis=0)
+
+    def _vector_kernels(self, vector):
+        if self.affinity == 'nearest_neighbors':
+            distances = euclidean_distances(vector.reshape(1, -1), self.X_)[0]
+
+            # To get distance to the kth neighbor get kth-order statistics
+            # n_neighbors - 1 as the point itself is a neighbor also.
+            distance_to_last_neighbor = np.partition(distances, self.n_neighbors_ - 1)[self.n_neighbors_ - 1]
+            distance_to_last_neighbor = np.full(self.X_.shape[0], distance_to_last_neighbor)
+            part1 = (distances <= self.kth_distance_ + 1e-14).astype(np.float)
+            part2 = (distances <= distance_to_last_neighbor + 1e-14).astype(np.float)
+
+            return (part1 + part2) / 2
+        elif self.affinity == 'rbf':
+            return rbf_kernel(np.array([vector]), self.X_, gamma=self.gamma_)
+
+    def out_of_sample_(self, vector):
+        # K(x, x_i)
+        kernels = self._vector_kernels(vector)
+        # Now we need to get \tilda{K}(v, x_i) for all x_i in self.X_
+        # common divisor part for all x_i
+        common_vector_divisor = kernels.mean()
+        # another common part is self.common_mean_
+
+        result_kernels = kernels / np.sqrt(common_vector_divisor * self.common_mean_) / self.X_.shape[0]
+
+        return np.dot(result_kernels, self.diffusion_map_[:, -2::-1]) * np.sqrt(np.sum(kernels))
+
+    def transform(self, X):
+        """Create out-of-sample extension for the data in X
+        based on previously fitted model
+
+        Parameters
+        ----------
+
+        X: array-like, shape (n_samples, n_features)
+            Data for manifold based on out-of-sample
+            extension algorithm.
+
+        Returns
+        -------
+        X_new: array-like, shape (n_samples, n_components)
+        """
+        if not self.include_oos:
+            raise ValueError("Out of sample extension is not supported "
+                             "(pass include_oos to the constructor).")
+        if self.affinity != "nearest_neighbors" and self.affinity != 'rbf':
+            raise ValueError("Out of sample extension is currently supported "
+                             "only for nearest neighbours and rbf affinity.")
+
+        X = check_array(X, ensure_min_samples=1, estimator=self)
+
+        if X.shape[1] != self.X_.shape[1]:
+            raise ValueError("Input vectors are required to have exactly the same number of "
+                             "dimensions %d as fitted model had. Got %d dimension vectors." %
+                             (X.shape[1], self.X_.shape[1]))
+
+        if self.common_mean_ is None:
+            self.common_mean_ = self._common_oos_mean()
+        if self.affinity == "nearest_neighbors" and self.kth_distance_ is None:
+            self.kth_distance_ = self._nth_distance_from_dataset()
+
+        embedding = np.empty((X.shape[0], self.n_components))
+        for i, vector in enumerate(X):
+            embedding[i] = self.out_of_sample_(vector)
+
+        return embedding
 
     def fit_transform(self, X, y=None):
         """Fit the model from data in X and transform X.
