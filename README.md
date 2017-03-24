@@ -29,3 +29,77 @@ MDS и IsoMap.
 
 * Реализовать алгоритм для построения out-of-sample вложения для алгоритмов MDS и IsoMap.
 * Реализовать алгоритм reverse out-of-sample для алгоритмов MDS и IsoMap.
+
+
+## Отчёт по контрольной точке номер 2
+
+### Запуск проекта
+
+Для запуска проекта необходимо выполнить инструкции по 
+сборке проекта с официального сайта scikit-learn.
+Их можно найти по
+[ссылке](http://scikit-learn.org/stable/developers/advanced_installation.html#installing-an-official-release)
+и по [ссылке на Github](https://github.com/scikit-learn/scikit-learn/blob/master/CONTRIBUTING.md).
+
+На практике, для корректной работы тестов и для построения документации,
+необходимо изменить переменную окружения PYTHONPATH чтобы скрипт сборки использовал
+библиотеку из локального модифицированного проекта.
+
+Для этого перед сборкой нужно написать (на Linux и Mac OS, на Windows используйте
+команды, которые специфичны для Windows):
+```bash
+$ export PYTHONPATH=<ПУТЬ ДО ПРОЕКТА>:$PYTHONPATH
+```
+
+### Описание реализованной функциональности
+
+В рамках данной контрольной точки был реализован алгоритм построения
+вложения Spectral Embedding (`sklearn.manifold.SpectralEmbedding`) для точек, которые не входят в обучающую выборку.
+
+Реализован алгоритм вложения для функции близости k-ближайших соседей
+и для функции RBF (Radial basis function kernel).
+
+Конкретно реализован метод `transform` для класса `SpectralEmbedding`,
+который будет доступен в случае, если конструктору будет передан
+параметр `include_oos` равный `True`, а мера близости (`affinity`) равна
+k-ближайших или RBF (`affinity == 'nearest_neighbors'` или
+ `affinity == 'rbf'`) для солвера собственных векторов `arpack` (стандартный солвер).
+ 
+Аргументы методов передаются в таком же формате, как и 
+
+Пример (построение вложения для точек, сгенерированных из выборки
+трёхмерной S-кривой):
+```python
+from sklearn.manifold import SpectralEmbedding
+from sklearn.datasets.samples_generator import make_s_curve
+
+# Количество точек для вложения.
+SAMPLES_COUNT = 1000
+# Состояние случайного генератора, для повторяемости.
+RAND_STATE = 1337
+
+# Генерация некоторого распределения для вложения.
+# Могло быть использовано и любое другое, характерное для данных,
+# распределение.
+s_curve, colors = make_s_curve(SAMPLES_COUNT, random_state=RAND_STATE)
+
+# Для того, чтобы иметь возможность строить вложение для новых
+# точек, необходимо передать параметр include_oos равный True.
+# Если будет передан False, то дополнительных затрат (по сравнению
+# с алгоритмом до модификации) не будет.
+SE = SpectralEmbedding(n_components=2, include_oos=True)
+# Обучение модели (обучение вложения по обучающей выборке).
+# Уже было реализовано в библиотеке.
+s_curve_embedded = SE.fit_transform(s_curve)
+# Построение "Out of Sample" для тех же точек (можно и для других
+# точек из того же распределения).
+s_curve_oos_embedded = SE.transform(s_curve)
+```
+
+Алгоритм построения вложения был взят из статьи 
+[Out-of-Sample Extensions for LLE, Isomap, MDS, Eigenmaps, and Spectral Clustering](http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.420.5053&rep=rep1&type=pdf)
+и был расширен для случая нормированного графа Лапласиана, как это
+указано в базовой статье алгоритма, уже реализованного в scikit-learn:
+[A Tutorial on Spectral Clustering, 2007 Ulrike von Luxburg](http://citeseerx.ist.psu.edu/viewdoc/summary?doi=10.1.1.165.9323)
+(Страница 5, Proposition 3, пункт 2).
+    
