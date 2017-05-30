@@ -333,7 +333,7 @@ def spectral_embedding(adjacency, n_components=8, eigen_solver=None,
             embedding = embedding[:n_components].T
         # For out of sample, we also need to
         # have original diffusion map ordered  (excluding constant vector)
-        return embedding, diffusion_map
+        return embedding, diffusion_map, lambdas
 
 
 class SpectralEmbedding(BaseEstimator):
@@ -436,6 +436,9 @@ class SpectralEmbedding(BaseEstimator):
         self.copy = copy
         self.common_mean_ = None
         self.kth_distance_ = None
+        self.lambdas_ = None
+        self.common_reverse_mean_ = None
+        self.kth_reverse_distance_ = None
 
     @property
     def _pairwise(self):
@@ -526,11 +529,11 @@ class SpectralEmbedding(BaseEstimator):
                                                  eigen_solver=self.eigen_solver,
                                                  random_state=random_state, include_oos=False)
         else:
-            self.embedding_, self.diffusion_map_ = spectral_embedding(affinity_matrix,
-                                                                      n_components=self.n_components,
-                                                                      eigen_solver=self.eigen_solver,
-                                                                      random_state=random_state,
-                                                                      include_oos=True)
+            self.embedding_, self.diffusion_map_, self.lambdas_ = spectral_embedding(affinity_matrix,
+                                                                                     n_components=self.n_components,
+                                                                                     eigen_solver=self.eigen_solver,
+                                                                                     random_state=random_state,
+                                                                                     include_oos=True)
 
         return self
 
@@ -584,7 +587,9 @@ class SpectralEmbedding(BaseEstimator):
 
         result_kernels = kernels / np.sqrt(common_vector_divisor * self.common_mean_) / self.X_.shape[0]
 
-        return np.dot(result_kernels, self.diffusion_map_[:, -2::-1]) * np.sqrt(np.sum(kernels))
+        result = np.dot(result_kernels, self.diffusion_map_[:, -2::-1]) * np.sqrt(np.sum(kernels))
+
+        return result
 
     def transform(self, X):
         """Create out-of-sample extension for the data in X
@@ -625,6 +630,76 @@ class SpectralEmbedding(BaseEstimator):
             embedding[i] = self.out_of_sample_(vector)
 
         return embedding
+
+    def _common_reverse_mean(self):
+        if self.affinity == 'nearest_neighbors':
+            affinity_matrix = kneighbors_graph(self.embedding_,
+                                               self.n_neighbors_,
+                                               include_self=True)
+            return affinity_matrix.mean(axis=0)
+        elif self.affinity == 'rbf':
+            affinity_matrix = rbf_kernel(self.embedding_, gamma=self.gamma_)
+            return affinity_matrix.mean(axis=0)
+
+    def _nth_reverse_distance_from_dataset(self):
+        neighbors_graph = kneighbors_graph(self.embedding_,
+                                           self.n_neighbors_,
+                                           include_self=True,
+                                           mode='distance')
+        # Distance to the nth neighbor is just the maximum
+        return neighbors_graph.max(axis=1).toarray().reshape(1, -1)[0]
+
+    def _vector_reverse_kernels(self, vector):
+        if self.affinity == 'nearest_neighbors':
+            distances = euclidean_distances(vector.reshape(1, -1), self.embedding_)[0]
+
+            # To get distance to the kth neighbor get kth-order statistics
+            # n_neighbors - 1 as the point itself is a neighbor also.
+            distance_to_last_neighbor = np.partition(distances, self.n_neighbors_ - 1)[self.n_neighbors_ - 1]
+            distance_to_last_neighbor = np.full(self.embedding_.shape[0], distance_to_last_neighbor)
+            part1 = (distances <= self.kth_reverse_distance_ + 1e-14).astype(np.float)
+            part2 = (distances <= distance_to_last_neighbor + 1e-14).astype(np.float)
+
+            return (part1 + part2) / 2
+        elif self.affinity == 'rbf':
+            return rbf_kernel(np.array([vector]), self.embedding_, gamma=self.gamma_)
+
+    def reconstruct_(self, vector):
+        # K(x, x_i)
+        kernels = self._vector_reverse_kernels(vector)
+        # Now we need to get \tilda{K}(v, x_i) for all x_i in self.X_
+        # common divisor part for all x_i
+        common_vector_divisor = kernels.mean()
+        # another common part is self.common_mean_
+
+        result_kernels = kernels / np.sqrt(common_vector_divisor * self.common_reverse_mean_) / self.embedding_.shape[0]
+
+        result = np.dot(result_kernels, self.X_) # * np.sqrt(np.sum(kernels))
+        return result
+
+    def reconstruct(self, X):
+        if not self.include_oos:
+            raise ValueError("Out of sample extension is not supported "
+                             "(pass include_oos to the constructor).")
+        if self.affinity != "nearest_neighbors" and self.affinity != 'rbf':
+            raise ValueError("Out of sample extension is currently supported "
+                             "only for nearest neighbours and rbf affinity.")
+        X = check_array(X, ensure_min_samples=1, estimator=self)
+        if X.shape[1] != self.embedding_.shape[1]:
+            raise ValueError("Input vectors are required to have exactly the same number of "
+                             "dimensions %d as fitted model had. Got %d dimension vectors." %
+                             (X.shape[1], self.embedding_.shape[1]))
+
+        if self.common_reverse_mean_ is None:
+            self.common_reverse_mean_ = self._common_reverse_mean()
+        if self.affinity == "nearest_neighbors" and self.kth_reverse_distance_ is None:
+            self.kth_reverse_distance_ = self._nth_reverse_distance_from_dataset()
+
+        reconstucted = np.empty((X.shape[0], self.X_.shape[1]))
+        for i, vector in enumerate(X):
+            reconstucted[i] = self.reconstruct_(vector)
+
+        return reconstucted
 
     def fit_transform(self, X, y=None):
         """Fit the model from data in X and transform X.
