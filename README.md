@@ -104,3 +104,14 @@ s_curve_oos_embedded = SE.transform(s_curve)
 [A Tutorial on Spectral Clustering, 2007 Ulrike von Luxburg](http://citeseerx.ist.psu.edu/viewdoc/summary?doi=10.1.1.165.9323)
 (Страница 5, Proposition 3, пункт 2).
     
+## Отчёт по контрольной точке номер 3
+
+# Изменения в проекте
+
+* Добавлен метод inverse_transform для класса SpectralEmbedding, который позволяет отображать
+точки из пространства сниженной размерности, в пространство исходных
+векторов.
+
+* Написана документация к внесённым изменениям (для её сборки необходимо
+обратиться к инструкции по сборке документации в исходном проекте
+scikit-learn).

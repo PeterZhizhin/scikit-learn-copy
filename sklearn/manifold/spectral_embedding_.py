@@ -190,6 +190,9 @@ def spectral_embedding(adjacency, n_components=8, eigen_solver=None,
     -------
     embedding : array, shape=(n_samples, n_components)
         The reduced samples.
+    diffusion_map : array, shape=(n_samples, n_components + 1)
+        Raw eigenvectors that are used for out-of-sample (before
+        multiplication on dd of graph laplacian).
     lambdas : array, shape=(n_components)
         The eigenvalues of the laplacian matrix for OoS extension
 
@@ -340,7 +343,7 @@ class SpectralEmbedding(BaseEstimator):
     """Spectral embedding for non-linear dimensionality reduction.
 
     Forms an affinity matrix given by the specified function and
-    applies spectral decomposition to the corresponding graph laplacian.
+    applies spectral decomposition to the AAAAAAA graph laplacian.
     The resulting transformation is given by the value of the
     eigenvectors for each data point.
 
@@ -401,9 +404,27 @@ class SpectralEmbedding(BaseEstimator):
         Eigenvalues that are computed based on laplacian matrix
         (eigenvalues of embedded vectors).
 
-    X_ : array shape = (n_saples, n_features)
+    X_ : array, shape = (n_samples, n_features)
         Input data provided to the algorithm (required for out-of-sample
         extension).
+        
+    common_mean_ : array, shape = (n_samples,)
+        Common value that is a mean over K(x, x_i) for each x_i in train
+        data set.
+        
+    kth_distance_ : array, shape = (n_samples,)
+        Distance to k-th neighbour from each of data samples in train
+        data set.
+        
+    lambdas_ : array, shape = (n_components,)
+        Eigenvalues from the algorithm.
+    
+    common_reverse_mean_ : array, shape = (n_samples,)
+        Common value that is a mean over K(y, y_i) for each y_i in embedded
+        data set.
+    
+    kth_reverse_distance_ : array, shape = (n_samples,)
+        Distance to each of embedded vectors from embedded data set.
 
     References
     ----------
@@ -563,6 +584,20 @@ class SpectralEmbedding(BaseEstimator):
         return np.mean(self.affinity_matrix_, axis=0)
 
     def _vector_kernels(self, vector):
+        """Calculate normalized kernel over each of x_i
+        in training data set applied to vector vector
+        
+        Parameters
+        ----------
+        vector : array, shape (,n_features)
+            Vector for computation of normalized kernel.
+
+        Returns
+        -------
+        kernel : array, shape (n_samples,)
+            Returns normalized kernel for each vector in
+            training data set.
+        """
         if self.affinity == 'nearest_neighbors':
             distances = euclidean_distances(vector.reshape(1, -1), self.X_)[0]
 
@@ -578,6 +613,19 @@ class SpectralEmbedding(BaseEstimator):
             return rbf_kernel(np.array([vector]), self.X_, gamma=self.gamma_)
 
     def out_of_sample_(self, vector):
+        """Calculate embedding of a vector into space
+        of embedded training data set.
+        
+        Parameters
+        ----------
+        vector : array, shape (,n_features)
+            Vector for embedding computation.
+
+        Returns
+        -------
+        embedded_vector : array, shape (n_samples,)
+            Returns embedding of an input vector.
+        """
         # K(x, x_i)
         kernels = self._vector_kernels(vector)
         # Now we need to get \tilda{K}(v, x_i) for all x_i in self.X_
@@ -632,6 +680,15 @@ class SpectralEmbedding(BaseEstimator):
         return embedding
 
     def _common_reverse_mean(self):
+        """Calculate common mean for inverse transformation 
+        (it is required for inverse kernel approximation).
+
+        Returns
+        -------
+        common_mean : array shape=(,n_samples)
+            Common mean vector for each embedded vector
+            from training data set.
+        """
         if self.affinity == 'nearest_neighbors':
             affinity_matrix = kneighbors_graph(self.embedding_,
                                                self.n_neighbors_,
@@ -642,6 +699,16 @@ class SpectralEmbedding(BaseEstimator):
             return affinity_matrix.mean(axis=0)
 
     def _nth_reverse_distance_from_dataset(self):
+        """Calculate distance to the nth neighbor of each
+        point from the embedding of input data 
+        (for inverse transformation).
+
+        Returns
+        -------
+        nth_distances : array shape=(,n_samples)
+            Distances to the nth closest neighbor of each
+            embedded vector from train data set.
+        """
         neighbors_graph = kneighbors_graph(self.embedding_,
                                            self.n_neighbors_,
                                            include_self=True,
@@ -650,6 +717,21 @@ class SpectralEmbedding(BaseEstimator):
         return neighbors_graph.max(axis=1).toarray().reshape(1, -1)[0]
 
     def _vector_reverse_kernels(self, vector):
+        """Calculate normalized kernel over each of y_i
+        in training data embedded vectors applied to
+        vector vector
+        
+        Parameters
+        ----------
+        vector : array, shape (,n_components)
+            Vector for computation of normalized kernel.
+
+        Returns
+        -------
+        kernel : array, shape (n_samples,)
+            Returns normalized kernel for each embedded
+            vector in training data set.
+        """
         if self.affinity == 'nearest_neighbors':
             distances = euclidean_distances(vector.reshape(1, -1), self.embedding_)[0]
 
@@ -677,7 +759,20 @@ class SpectralEmbedding(BaseEstimator):
         result = np.dot(result_kernels, self.X_) # * np.sqrt(np.sum(kernels))
         return result
 
-    def reconstruct(self, X):
+    def inverse_transform(self, X):
+        """Create inverse transformation from embedded
+        vectors into original data space.
+
+        Parameters
+        ----------
+
+        X: array-like, shape (n_samples, n_components)
+            Data to transform into original space.
+
+        Returns
+        -------
+        X_new: array-like, shape (n_samples, n_features)
+        """
         if not self.include_oos:
             raise ValueError("Out of sample extension is not supported "
                              "(pass include_oos to the constructor).")
